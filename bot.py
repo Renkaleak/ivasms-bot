@@ -35,7 +35,7 @@ def admin_only(handler):
     async def wrapper(msg: Message, **kwargs):
         if not db.is_admin(msg.from_user.id):
             return
-        return await handler(msg, **kwargs)
+        return await handler(msg)
     return wrapper
 
 
