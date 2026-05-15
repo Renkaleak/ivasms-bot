@@ -30,11 +30,19 @@ class CFBlockedError(Exception):
     pass
 
 
+class SessionExpiredError(Exception):
+    pass
+
+
 class _MockResp:
     def __init__(self, status: int, body_text: str, url: str, body_bytes: bytes = None):
         self.status = status
         self._body_text = body_text or ""
-        self._body_bytes = body_bytes if body_bytes is not None else (body_text or "").encode("utf-8", errors="ignore")
+        self._body_bytes = (
+            body_bytes
+            if body_bytes is not None
+            else (body_text or "").encode("utf-8", errors="ignore")
+        )
         self.url = url
 
 
@@ -96,16 +104,14 @@ def numbers_to_txt(numbers: list[str]) -> bytes:
     return "\n".join(numbers).encode("utf-8")
 
 
-def _normalize_timeout(kwargs: dict) -> dict:
-    """Convert aiohttp.ClientTimeout to integer seconds for curl_cffi."""
-    kw = dict(kwargs)
-    if "timeout" in kw:
-        t = kw["timeout"]
-        if hasattr(t, "total") and t.total is not None:
-            kw["timeout"] = int(t.total)
-        elif hasattr(t, "total"):
-            kw["timeout"] = 30
-    return kw
+def _timeout_seconds(t) -> int:
+    if t is None:
+        return 30
+    if hasattr(t, "total") and t.total is not None:
+        return int(t.total)
+    if isinstance(t, (int, float)):
+        return int(t)
+    return 30
 
 
 class IVASMSClient:
@@ -118,13 +124,8 @@ class IVASMSClient:
     async def open(self):
         if self.session:
             return
-        # impersonate="chrome120" makes curl mimic Chrome TLS fingerprint,
-        # bypassing Cloudflare bot detection without needing cf_clearance
-        self.session = CurlSession(
-            impersonate="chrome120",
-            headers={**DEFAULT_HEADERS, "User-Agent": self.user_agent},
-        )
-        self._apply_cookies()
+        # chrome124 → better Cloudflare bypass via JA3/JA4 TLS fingerprinting
+        self.session = CurlSession(impersonate="chrome124")
 
     async def close(self):
         if self.session:
@@ -138,24 +139,81 @@ class IVASMSClient:
     async def __aexit__(self, *_):
         await self.close()
 
-    def _apply_cookies(self):
-        if self.session:
-            for name, value in self.cookies.items():
-                self.session.cookies.set(name, value, domain="www.ivasms.com")
-
     def get_cookies_str(self) -> str:
         merged = dict(self.cookies)
         if self.session:
-            for name, value in self.session.cookies.items():
-                if name and value:
-                    merged[name] = value
+            for c in self.session.cookies:
+                if c.name and c.value:
+                    merged[c.name] = c.value
         return json.dumps(merged)
 
+    # ------------------------------------------------------------------ #
+    # Core request                                                         #
+    # ------------------------------------------------------------------ #
+
+    async def _request(
+        self,
+        method: str,
+        url: str,
+        read_bytes: bool = False,
+        headers: dict | None = None,
+        data: dict | str | None = None,
+        allow_redirects: bool = True,
+        timeout=None,
+    ) -> _MockResp:
+        """
+        Make an HTTP request via curl_cffi (Chrome TLS fingerprint).
+        Cookies are passed directly in every request so they're always fresh.
+        Falls back to FlareSolverr cookie refresh on genuine CF challenge.
+        """
+        timeout_s = _timeout_seconds(timeout)
+
+        kw: dict = {
+            "cookies": self.cookies,
+            "allow_redirects": allow_redirects,
+            "timeout": timeout_s,
+        }
+        if headers:
+            kw["headers"] = headers
+        if data is not None:
+            kw["data"] = data
+
+        for attempt in range(2):
+            resp = await getattr(self.session, method)(url, **kw)
+
+            status = resp.status_code
+            if read_bytes:
+                body_bytes = resp.content
+                body_text = body_bytes.decode("utf-8", errors="ignore")
+            else:
+                body_text = resp.text
+                body_bytes = body_text.encode("utf-8")
+
+            # Absorb cookies set by server
+            for c in resp.cookies:
+                if c.name and c.value:
+                    self.cookies[c.name] = c.value
+                    kw["cookies"] = self.cookies  # keep kw fresh for retry
+
+            if is_cf_challenge(body_text, status):
+                logger.warning(
+                    f"CF challenge at {url} | HTTP {status} | "
+                    f"body[:150]: {body_text[:150].strip()!r}"
+                )
+                if attempt == 0:
+                    await self._refresh_cf_via_flaresolverr()
+                    kw["cookies"] = self.cookies
+                    continue
+                raise CFBlockedError(f"CF blocked after retry: {url}")
+
+            logger.debug(
+                f"{method.upper()} {url} → HTTP {status} | "
+                f"body[:80]: {body_text[:80].strip()!r}"
+            )
+            return _MockResp(status, body_text, str(resp.url), body_bytes if read_bytes else None)
+
     async def _refresh_cf_via_flaresolverr(self):
-        """
-        Visit ivasms.com base URL via FlareSolverr to get fresh CF cookies.
-        Used as fallback when curl_cffi still hits a CF challenge.
-        """
+        """Visit ivasms.com base URL via FlareSolverr to collect fresh CF cookies."""
         cookies_list = [{"name": k, "value": v} for k, v in self.cookies.items()]
         payload = {
             "cmd": "request.get",
@@ -180,46 +238,15 @@ class IVASMSClient:
                 ua = solution.get("userAgent")
                 if ua:
                     self.user_agent = ua
-                logger.info("CF cookies refreshed via FlareSolverr fallback")
+                logger.info("CF cookies refreshed via FlareSolverr")
             else:
                 logger.error(f"FlareSolverr fallback failed: {data.get('message')}")
         except Exception as e:
             logger.error(f"_refresh_cf_via_flaresolverr: {e}")
 
-    async def _request(self, method: str, url: str, read_bytes: bool = False, **kwargs):
-        """
-        Central request wrapper using curl_cffi (Chrome TLS fingerprint).
-        Bypasses Cloudflare without needing cf_clearance cookies.
-        Falls back to FlareSolverr cookie refresh if still blocked.
-        """
-        kw = _normalize_timeout(kwargs)
-
-        for attempt in range(2):
-            resp = await getattr(self.session, method)(url, **kw)
-
-            status = resp.status_code
-            if read_bytes:
-                body_bytes = resp.content
-                body_text = body_bytes.decode("utf-8", errors="ignore")
-            else:
-                body_text = resp.text
-                body_bytes = body_text.encode("utf-8")
-
-            # Absorb any new cookies set by the server
-            for name, value in resp.cookies.items():
-                if name and value:
-                    self.cookies[name] = value
-
-            if is_cf_challenge(body_text, status):
-                if attempt == 0:
-                    logger.warning(f"CF challenge at {url} even with curl_cffi — using FlareSolverr fallback")
-                    await self._refresh_cf_via_flaresolverr()
-                    await self.close()
-                    await self.open()
-                    continue
-                raise CFBlockedError(f"CF blocked after all retries: {url}")
-
-            return _MockResp(status, body_text, str(resp.url), body_bytes if read_bytes else None)
+    # ------------------------------------------------------------------ #
+    # Auth / session                                                        #
+    # ------------------------------------------------------------------ #
 
     async def login(self) -> bool:
         try:
@@ -229,6 +256,10 @@ class IVASMSClient:
                 allow_redirects=True,
                 timeout=aiohttp.ClientTimeout(total=20),
             )
+            final_url = str(resp.url)
+            if "/login" in final_url:
+                logger.error("login: redirected to /login — cookies are expired")
+                return False
             if resp.status != 200:
                 logger.error(f"login: HTTP {resp.status}")
                 return False
@@ -238,10 +269,10 @@ class IVASMSClient:
                 self.csrf_token = m.group(1)
                 logger.info("login OK — CSRF acquired")
                 return True
-            logger.error("login: CSRF not found — cookies may be expired")
+            logger.error(f"login: CSRF not found | url={final_url} | body[:200]: {html[:200]!r}")
             return False
-        except CFBlockedError:
-            logger.error("login: CF blocked even after FlareSolverr fallback")
+        except CFBlockedError as e:
+            logger.error(f"login: {e}")
             return False
         except Exception as e:
             logger.error(f"login error: {e}")
@@ -267,6 +298,10 @@ class IVASMSClient:
             logger.error(f"keepalive: {e}")
             return False
 
+    # ------------------------------------------------------------------ #
+    # Business logic                                                        #
+    # ------------------------------------------------------------------ #
+
     async def get_wa_active_ranges(self, limit: int = 2000) -> list[dict]:
         xsrf = _xsrf_header(self.cookies)
         params = {
@@ -288,16 +323,25 @@ class IVASMSClient:
             "Referer": f"{IVASMS_BASE_URL}/portal/sms/test/sms",
         }
         try:
-            resp = await self._request("get", url, headers=hdrs, timeout=aiohttp.ClientTimeout(total=30))
+            resp = await self._request(
+                "get", url, headers=hdrs, timeout=aiohttp.ClientTimeout(total=30)
+            )
+            if not resp._body_text.strip():
+                logger.error(f"get_wa_active_ranges: empty response body | HTTP {resp.status}")
+                return []
             data = json.loads(resp._body_text)
         except (json.JSONDecodeError, ValueError) as e:
-            logger.error(f"get_wa_active_ranges JSON parse error: {e} | body[:200]: {resp._body_text[:200] if 'resp' in dir() else 'N/A'}")
+            logger.error(
+                f"get_wa_active_ranges JSON error: {e} | "
+                f"body[:300]: {resp._body_text[:300] if 'resp' in dir() else 'N/A'!r}"
+            )
             return []
         except Exception as e:
             logger.error(f"get_wa_active_ranges: {e}")
             return []
 
         rows = data.get("data", [])
+        logger.info(f"get_wa_active_ranges: got {len(rows)} rows from API")
         range_map: dict[str, dict] = {}
         for r in rows:
             tid = r.get("termination_id")
@@ -325,7 +369,7 @@ class IVASMSClient:
     async def add_range(self, termination_id: int | str, max_retry: int = 3) -> dict:
         if not self.csrf_token:
             return {"ok": False, "message": "No CSRF token — call login() first"}
-        payload = {"_token": self.csrf_token, "id": str(termination_id)}
+        payload_data = {"_token": self.csrf_token, "id": str(termination_id)}
         hdrs = {
             "Content-Type": "application/x-www-form-urlencoded",
             "X-Requested-With": "XMLHttpRequest",
@@ -336,12 +380,13 @@ class IVASMSClient:
                 resp = await self._request(
                     "post",
                     f"{IVASMS_BASE_URL}/portal/numbers/termination/number/add",
-                    data=payload, headers=hdrs,
+                    data=payload_data,
+                    headers=hdrs,
                     timeout=aiohttp.ClientTimeout(total=15),
                 )
                 if resp.status == 429:
                     wait = 5 * (attempt + 1)
-                    logger.warning(f"add_range 429 — waiting {wait}s (attempt {attempt+1})")
+                    logger.warning(f"add_range 429 — waiting {wait}s")
                     if attempt < max_retry:
                         await asyncio.sleep(wait)
                         continue
@@ -368,7 +413,8 @@ class IVASMSClient:
             resp = await self._request(
                 "post",
                 f"{IVASMS_BASE_URL}/portal/numbers/return/allnumber/bluck",
-                data={"_token": self.csrf_token}, headers=hdrs,
+                data={"_token": self.csrf_token},
+                headers=hdrs,
                 timeout=aiohttp.ClientTimeout(total=30),
             )
             j = json.loads(resp._body_text)
