@@ -32,10 +32,10 @@ def main_keyboard() -> ReplyKeyboardMarkup:
 
 
 def admin_only(handler):
-    async def wrapper(msg: Message, *args, **kwargs):
+    async def wrapper(msg: Message, **kwargs):
         if not db.is_admin(msg.from_user.id):
             return
-        return await handler(msg, *args, **kwargs)
+        return await handler(msg, **kwargs)
     return wrapper
 
 
