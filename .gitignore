@@ -1,0 +1,5 @@
+.env
+db.json
+ua.txt
+__pycache__/
+*.pyc
