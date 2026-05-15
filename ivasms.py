@@ -189,11 +189,11 @@ class IVASMSClient:
                 body_text = resp.text
                 body_bytes = body_text.encode("utf-8")
 
-            # Absorb cookies set by server
-            for c in resp.cookies:
-                if c.name and c.value:
-                    self.cookies[c.name] = c.value
-                    kw["cookies"] = self.cookies  # keep kw fresh for retry
+            # Absorb cookies set by server (curl_cffi cookies is a dict)
+            for name, value in resp.cookies.items():
+                if name and value:
+                    self.cookies[name] = value
+            kw["cookies"] = self.cookies  # keep kw fresh for retry
 
             if is_cf_challenge(body_text, status):
                 logger.warning(
