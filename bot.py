@@ -60,7 +60,7 @@ def register_handlers(dp: Dispatcher, bot: Bot):
             parse_mode="HTML",
         )
 
-    @dp.message(F.text.startswith("[{"))
+    @dp.message(F.text.startswith("["))
     @admin_only
     async def handle_cookies_input(msg: Message):
         uid = msg.from_user.id
