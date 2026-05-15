@@ -14,28 +14,45 @@ UA_FILE = "ua.txt"
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/120.0.0.0 Safari/537.36"
+    "Chrome/124.0.0.0 Safari/537.36"
 )
 
 
 def is_cf_challenge(html: str, status: int) -> bool:
-    if status in (403, 503):
-        return True
+    """
+    Detect a real Cloudflare challenge — NOT triggered by plain 403/expired session.
+    Only returns True for genuine CF JS/Turnstile/CAPTCHA pages.
+    """
     lower = html.lower()
-    checks = [
+
+    # 503 from Cloudflare is almost always a challenge
+    if status == 503 and ("cloudflare" in lower or len(html) < 3000):
+        return True
+
+    # Strong CF challenge indicators
+    cf_keywords = [
         "cf-browser-verification",
         "turnstile",
         "challenges.cloudflare.com",
         "performing security verification",
         "cf_chl_opt",
+        "just a moment",
+        "__cf_chl_",
+        "cf_clearance",
+        "enable javascript and cookies to continue",
     ]
-    for c in checks:
-        if c in lower:
+    for kw in cf_keywords:
+        if kw in lower:
             return True
+
+    # Ray ID + Cloudflare = CF error/challenge page
     if "ray id" in lower and "cloudflare" in lower:
         return True
-    if len(html) < 2000 and "cloudflare" in lower:
+
+    # Very short page that mentions cloudflare (CF error page)
+    if len(html) < 1500 and "cloudflare" in lower:
         return True
+
     return False
 
 
