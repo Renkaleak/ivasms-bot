@@ -12,9 +12,9 @@ IVASMS_BASE_URL = os.getenv("IVASMS_BASE_URL", "https://www.ivasms.com")
 UA_FILE = "ua.txt"
 
 DEFAULT_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "Mozilla/5.0 (Linux; Android 10; K) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/124.0.0.0 Safari/537.36"
+    "Chrome/148.0.0.0 Mobile Safari/537.36"
 )
 
 
