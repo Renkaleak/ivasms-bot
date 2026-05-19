@@ -84,7 +84,7 @@ async def solve_challenge(url: str = IVASMS_BASE_URL) -> dict | None:
             return None
 
         solution = data.get("solution", {})
-        ua = CUSTOM_UA  # always use our own UA instead of FlareSolverr's
+        ua = solution.get("userAgent", CUSTOM_UA)  # must match the UA used during CF solve  # always use our own UA instead of FlareSolverr's
         raw_cookies = solution.get("cookies", [])
 
         cookies = {}
