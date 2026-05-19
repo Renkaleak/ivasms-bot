@@ -12,9 +12,14 @@ IVASMS_BASE_URL = os.getenv("IVASMS_BASE_URL", "https://www.ivasms.com")
 UA_FILE = "ua.txt"
 
 DEFAULT_UA = (
-    "Mozilla/5.0 (Linux; Android 10; K) "
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/148.0.0.0 Mobile Safari/537.36"
+    "Chrome/124.0.0.0 Safari/537.36"
+)
+
+CUSTOM_UA = os.getenv(
+    "CUSTOM_USER_AGENT",
+    "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Mobile Safari/537.36",
 )
 
 
@@ -79,7 +84,7 @@ async def solve_challenge(url: str = IVASMS_BASE_URL) -> dict | None:
             return None
 
         solution = data.get("solution", {})
-        ua = solution.get("userAgent", DEFAULT_UA)
+        ua = CUSTOM_UA  # always use our own UA instead of FlareSolverr's
         raw_cookies = solution.get("cookies", [])
 
         cookies = {}
@@ -104,6 +109,6 @@ def get_saved_ua() -> str:
     try:
         with open(UA_FILE) as f:
             ua = f.read().strip()
-            return ua if ua else DEFAULT_UA
+            return ua if ua else CUSTOM_UA
     except FileNotFoundError:
-        return DEFAULT_UA
+        return CUSTOM_UA
