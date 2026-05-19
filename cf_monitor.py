@@ -58,7 +58,7 @@ class CFMonitor:
                 logger.error(f"CFMonitor alert send error: {e}")
 
     async def _solve_and_update(self) -> bool:
-        result = await solve_challenge(IVASMS_BASE_URL)
+        result = await solve_challenge(f"{IVASMS_BASE_URL}/portal/sms/received")
         if not result:
             await self._alert("❌ <b>FlareSolverr failed to solve CF challenge.</b>\nWill retry in 2 minutes.")
             return False
